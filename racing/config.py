@@ -4,12 +4,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
-    # Betfair
-    betfair_username: str = ""
-    betfair_password: str = ""
-    betfair_app_key: str = ""
-    betfair_cert_path: str = "./certs/betfair.crt"
-    betfair_key_path: str = "./certs/betfair.key"
+    # The Odds API
+    odds_api_key: str = ""
+    odds_api_bookmakers: str = "tab,sportsbet"   # comma-separated
+    odds_api_regions: str = "au"
 
     # Supabase
     supabase_url: str = ""
@@ -34,6 +32,10 @@ class Settings(BaseSettings):
     @property
     def is_phase2(self) -> bool:
         return bool(self.punting_form_api_key)
+
+    @property
+    def bookmakers_list(self) -> list[str]:
+        return [b.strip() for b in self.odds_api_bookmakers.split(",") if b.strip()]
 
 
 settings = Settings()

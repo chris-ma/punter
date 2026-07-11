@@ -1,4 +1,4 @@
-import { api, type Race } from "@/lib/api";
+import { getRaces, type Race } from "@/lib/db";
 import { RaceList } from "@/components/RaceList";
 
 export const dynamic = "force-dynamic";
@@ -17,9 +17,9 @@ export default async function HomePage() {
 
   let races: Race[] = [];
   try {
-    races = await api.getRaces(date);
+    races = await getRaces(date);
   } catch {
-    // API not yet running — show empty state
+    // Supabase not yet configured — show empty state
   }
 
   return (

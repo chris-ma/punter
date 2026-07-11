@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { api } from "@/lib/api";
+import { getRace } from "@/lib/db";
 import { RaceDetailClient } from "./RaceDetailClient";
 
 interface Props {
@@ -10,12 +10,8 @@ interface Props {
 export default async function RacePage({ params }: Props) {
   const { id } = await params;
 
-  let race;
-  try {
-    race = await api.getRace(id);
-  } catch {
-    notFound();
-  }
+  const race = await getRace(id).catch(() => null);
+  if (!race) notFound();
 
   return (
     <main className="mx-auto max-w-4xl px-4 py-8">

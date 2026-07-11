@@ -2,7 +2,7 @@
 
 import useSWR from "swr";
 import { useEffect, useRef, useState } from "react";
-import { api, type Race, type Runner } from "@/lib/api";
+import { getRaceRunners, type Race, type Runner } from "@/lib/db";
 import { RunnerTable } from "@/components/RunnerTable";
 import { FreshnessBar } from "@/components/FreshnessBar";
 import { CountdownTimer } from "@/components/CountdownTimer";
@@ -23,7 +23,7 @@ export function RaceDetailClient({ race }: Props) {
 
   const { data: runners } = useSWR<Runner[]>(
     `/races/${race.id}/runners`,
-    () => api.getRaceRunners(race.id),
+    () => getRaceRunners(race.id),
     {
       refreshInterval: interval,
       onSuccess: () => setLastFetchedAt(new Date()),

@@ -2,15 +2,10 @@
 Scheduler entry point — `python -m racing.scheduler`
 
 Manages the full Phase 1 pipeline lifecycle:
-  - 18:00 AEST nightly: seed next day's races/runners from Betfair API
+  - 18:00 AEST nightly: seed next day's races/runners from The Odds API
   - 18:05 AEST nightly: write Phase 1 baseline predictions (market-implied probs)
-  - Continuous: Betfair streaming client for live odds
-  - Every 5 min: mark past races as closed; ingest results for settled markets
-
-All times are in AEST (Australia/Sydney) per §6.4. QLD does not observe daylight
-saving but AEST/AEDT is the dominant zone for VIC/NSW which host most major racing.
-For a future multi-state scheduler, each race's scheduled_jump_at is stored as UTC
-and the per-race timezone is derivable from the state column.
+  - Every 60s (15s near jump): poll The Odds API for live odds + refresh edge
+  - Every 5 min: mark past races as closed; log results gap (Phase 2 fills this)
 
 Run:
     cd ~/Projects/Racing
@@ -29,9 +24,8 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from racing.config import settings
-from racing.pipeline.betfair.streaming import BetfairStreamClient
 from racing.pipeline.tasks import baseline_predict, nightly_batch, results
-from racing.pipeline.tasks.live_poll import on_snapshot
+from racing.pipeline.tasks import live_poll
 
 log = logging.getLogger(__name__)
 
@@ -42,20 +36,22 @@ logging.basicConfig(
 
 
 def _nightly_job() -> None:
-    """Seed tomorrow's races then immediately write baseline predictions."""
     tomorrow = date.today() + timedelta(days=1)
     nightly_batch.run(for_date=tomorrow)
     baseline_predict.run_for_date(race_date=tomorrow)
 
 
 def _results_job() -> None:
-    """Close past races and ingest any settled results."""
     results.mark_races_closed()
     results.run()
 
 
 def main() -> None:
     log.info("Racing Edge scheduler starting (phase=%s)", "2" if settings.is_phase2 else "1")
+
+    if not settings.odds_api_key:
+        log.error("ODDS_API_KEY is not set — pipeline cannot run. Check your .env file.")
+        sys.exit(1)
 
     scheduler = BackgroundScheduler(timezone="Australia/Sydney")
 
@@ -66,34 +62,36 @@ def main() -> None:
         id="nightly_batch",
         name="Nightly race seeding + baseline predict",
         replace_existing=True,
-        misfire_grace_time=3600,  # if missed, still run within 1 hour
+        misfire_grace_time=3600,
     )
 
-    # Results ingestion: every 5 minutes
+    # Live odds polling: runs every 60s (15s within 10 min of jump)
     scheduler.add_job(
-        _results_job,
-        IntervalTrigger(minutes=5),
-        id="results_ingestion",
-        name="Close races + ingest results",
+        live_poll.run,
+        IntervalTrigger(seconds=settings.live_poll_interval_seconds),
+        id="live_poll",
+        name="Live odds poll",
         replace_existing=True,
     )
 
-    # Betfair streaming client — runs on its own thread, feeds on_snapshot callback
-    stream_client = BetfairStreamClient(on_snapshot=on_snapshot)
+    # Results / race close check: every 5 minutes
+    scheduler.add_job(
+        _results_job,
+        IntervalTrigger(minutes=5),
+        id="results_check",
+        name="Close races + check results",
+        replace_existing=True,
+    )
 
     scheduler.start()
-    log.info("Scheduler running. Nightly batch at %02d:00 AEST.", settings.nightly_batch_hour_aest)
+    log.info(
+        "Scheduler running — nightly batch at %02d:00 AEST, odds polling every %ds.",
+        settings.nightly_batch_hour_aest,
+        settings.live_poll_interval_seconds,
+    )
 
-    try:
-        stream_client.start()
-        log.info("Betfair streaming client started")
-    except Exception:
-        log.exception("Could not start Betfair streaming client — check credentials and certs")
-
-    # Block until SIGINT/SIGTERM
     def _shutdown(sig, frame):
         log.info("Shutdown signal received")
-        stream_client.stop()
         scheduler.shutdown(wait=False)
         sys.exit(0)
 
