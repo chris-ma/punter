@@ -70,6 +70,7 @@ def get_race_runners(race_id: str):
     live odds tick merged in. Ranked by win_prob descending.
 
     Returns data-freshness metadata so the UI can flag stale odds.
+    Uses 3 bulk queries (runners, predictions, ticks) rather than N+1 per runner.
     """
     from datetime import datetime, timezone
 
@@ -79,44 +80,53 @@ def get_race_runners(race_id: str):
     if not race_res.data:
         raise HTTPException(status_code=404, detail="Race not found")
 
-    runners_res = (
-        db.table("runners").select("*").eq("race_id", race_id).execute()
+    runners_res = db.table("runners").select("*").eq("race_id", race_id).execute()
+    if not runners_res.data:
+        return []
+
+    runner_ids = [r["id"] for r in runners_res.data]
+
+    # Bulk fetch latest prediction per runner
+    preds_res = (
+        db.table("predictions")
+        .select("runner_id, win_prob, market_implied_prob, edge, confidence_score, predicted_at")
+        .in_("runner_id", runner_ids)
+        .order("predicted_at", desc=True)
+        .execute()
     )
+    # Deduplicate to most recent prediction per runner
+    latest_pred: dict[str, dict] = {}
+    for p in preds_res.data:
+        if p["runner_id"] not in latest_pred:
+            latest_pred[p["runner_id"]] = p
+
+    # Bulk fetch latest tick per runner
+    ticks_res = (
+        db.table("odds_ticks")
+        .select("runner_id, win_back, ticked_at")
+        .in_("runner_id", runner_ids)
+        .order("ticked_at", desc=True)
+        .execute()
+    )
+    latest_tick: dict[str, dict] = {}
+    for t in ticks_res.data:
+        if t["runner_id"] not in latest_tick:
+            latest_tick[t["runner_id"]] = t
 
     now = datetime.now(timezone.utc)
     output = []
 
     for r in runners_res.data:
         runner_id = r["id"]
-
-        # Latest model prediction
-        pred = (
-            db.table("predictions")
-            .select("win_prob, market_implied_prob, edge, confidence_score")
-            .eq("runner_id", runner_id)
-            .order("predicted_at", desc=True)
-            .limit(1)
-            .maybe_single()
-            .execute()
-        )
-
-        # Latest odds tick
-        tick = (
-            db.table("odds_ticks")
-            .select("win_back, ticked_at")
-            .eq("runner_id", runner_id)
-            .order("ticked_at", desc=True)
-            .limit(1)
-            .maybe_single()
-            .execute()
-        )
+        pred = latest_pred.get(runner_id)
+        tick = latest_tick.get(runner_id)
 
         data_age = None
         win_back = None
-        if tick.data:
-            ticked_at = datetime.fromisoformat(tick.data["ticked_at"])
+        if tick:
+            ticked_at = datetime.fromisoformat(tick["ticked_at"])
             data_age = (now - ticked_at).total_seconds()
-            win_back = tick.data["win_back"]
+            win_back = tick["win_back"]
 
         output.append(RunnerSummary(
             id=runner_id,
@@ -126,10 +136,10 @@ def get_race_runners(race_id: str):
             trainer=r.get("trainer"),
             weight_kg=r.get("weight_kg"),
             scratched=r["scratched"],
-            win_prob=pred.data.get("win_prob") if pred.data else None,
-            market_implied_prob=pred.data.get("market_implied_prob") if pred.data else None,
-            edge=pred.data.get("edge") if pred.data else None,
-            confidence_score=pred.data.get("confidence_score") if pred.data else None,
+            win_prob=pred["win_prob"] if pred else None,
+            market_implied_prob=pred["market_implied_prob"] if pred else None,
+            edge=pred["edge"] if pred else None,
+            confidence_score=pred["confidence_score"] if pred else None,
             win_back=win_back,
             data_age_seconds=data_age,
         ))
